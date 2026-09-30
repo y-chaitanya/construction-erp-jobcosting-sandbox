@@ -68,14 +68,25 @@ daily shifts, they were **accumulated weekly logs**. A 40-hour week is not a
 40-hour day, and my rule couldn't tell the difference because I hadn't thought
 about what the number actually represented.
 
-**The fix** was a conditional `CASE` statement with `OR` logic, so the view
-evaluates entries against the right expectation:
+**The fix** had two parts, because the problem had two parts:
 
-- Standard weekly accumulations pass cleanly
-- A **negative entry** — `-5` hours — is trapped
-- A **single-shift overrun typo** — 24 hours in one day — is trapped
+1. **The table couldn't say what a number meant.** I added an `entry_type`
+   column (`DAILY` or `WEEKLY`) so every timecard row records whether its hours
+   are one shift or a week's total. Weekly logs are dated by week-ending date.
+2. **The view now applies the threshold that matches the entry type**, with a
+   `CASE` statement and `OR` logic:
+   - Any entry of **zero or less** is trapped, whatever its type
+   - A **daily** entry over **16 hours** is trapped (e.g. a 24-hour shift typo)
+   - A **weekly** entry over **80 hours** is trapped
 
-Both real anomalies still get caught. Valid data no longer does.
+Run the script and the view returns exactly two rows: the `-5` entry and the
+24-hour shift. The three weekly logs (40, 40, 35) no longer appear.
+
+> **Correction note.** An earlier version of this repository described the fix
+> but the view still used a single `hours_worked > 16` rule, so it continued to
+> flag the three valid weekly logs. I found this when I re-ran the script to
+> check it, and replaced it with the version above. The repository history shows
+> both.
 
 ### Why this is the part worth writing down
 
@@ -122,8 +133,8 @@ validation rule is only useful if people leave it switched on.**
   equipment costs, change orders, retainage, subcontractor commitments and
   revenue recognition. I modelled the core loop: estimate → actual → variance.
 - **The thresholds are my own judgment**, written down so they can be argued
-  with. 16 hours as a daily ceiling is a reasonable guess, not an industry
-  standard.
+  with. 16 hours as a daily ceiling and 80 hours as a weekly ceiling are
+  reasonable guesses, not industry standards.
 
 ---
 
