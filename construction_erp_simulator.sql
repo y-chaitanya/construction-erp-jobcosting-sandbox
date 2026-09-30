@@ -23,7 +23,9 @@ CREATE TABLE field_labor_logs (
     cost_code VARCHAR(10),
     crew_leader VARCHAR(30),
     hours_worked INT,
-    hourly_rate DECIMAL(10,2)
+    hourly_rate DECIMAL(10,2),
+    entry_type VARCHAR(10) NOT NULL DEFAULT 'DAILY'
+        CHECK (entry_type IN ('DAILY', 'WEEKLY'))  -- what the hours figure represents
 );
 
 -- Track 3: Material Purchasing Invoices (Accounts Payable Supply Records)
@@ -44,10 +46,11 @@ INSERT INTO erp_job_estimates VALUES ('91381', '02-300', 'Irrigation & Pipe Inst
 INSERT INTO erp_job_estimates VALUES ('91381', '02-500', 'Commercial Oak Tree Planting', 30000.00);
 
 -- Loading Baseline Crew Timecard Log Entries
-INSERT INTO field_labor_logs (date_worked, job_id, cost_code, crew_leader, hours_worked, hourly_rate) 
-VALUES ('2026-09-10', '91381', '02-300', 'Martinez_J', 40, 45.00), -- Weekly running log
-       ('2026-09-11', '91381', '02-300', 'Martinez_J', 40, 45.00), -- Weekly running log
-       ('2026-09-12', '91381', '02-500', 'Hernandez_R', 35, 50.00); -- Weekly running log
+-- Weekly logs are dated by week-ending date (Friday).
+INSERT INTO field_labor_logs (date_worked, job_id, cost_code, crew_leader, hours_worked, hourly_rate, entry_type) 
+VALUES ('2026-09-04', '91381', '02-300', 'Martinez_J', 40, 45.00, 'WEEKLY'),  -- Week ending 09/04
+       ('2026-09-11', '91381', '02-300', 'Martinez_J', 40, 45.00, 'WEEKLY'),  -- Week ending 09/11
+       ('2026-09-11', '91381', '02-500', 'Hernandez_R', 35, 50.00, 'WEEKLY'); -- Week ending 09/11
 
 -- Loading Supply Chain Nursery Invoices
 INSERT INTO vendor_material_invoices VALUES 
@@ -61,13 +64,20 @@ INSERT INTO vendor_material_invoices VALUES
 -- I initially built a rule checking for single-day shift entry typos: "hours_worked > 16".
 -- However, because my test dataset contained weekly running log values (40, 40, 35),
 -- my strict single-shift rule unexpectedly flagged those valid rows as exceptions.
--- Below is my calibrated, production-grade fix using a CASE statement and OR logic.
--- This dynamically keeps regular logs clear while accurately trapping true system anomalies.
+-- The rule was not the problem; my assumption about what the number meant was.
+-- A 40-hour week is not a 40-hour day, and the table had no way to say which one
+-- a row was. The fix has two parts:
+--   1. An entry_type column (DAILY / WEEKLY) so each row records what its hours represent.
+--   2. A view that applies the threshold that matches the entry type.
+-- Thresholds are my own judgment, written down so they can be argued with:
+--   DAILY  > 16 hours  -> flagged as a likely single-shift typo
+--   WEEKLY > 80 hours  -> flagged as an implausible weekly total
+--   Any entry of zero or less -> flagged regardless of type
 
 -- Injecting Active Human Entry Anomalies to test the validation engine
-INSERT INTO field_labor_logs (date_worked, job_id, cost_code, crew_leader, hours_worked, hourly_rate) 
-VALUES ('2026-09-13', '91381', '02-300', 'Unknown_Entry', -5, 45.00), -- Traps Negative Value Entry Error
-       ('2026-09-15', '91381', '02-300', 'Smith_T', 24, 45.00);      -- Traps Shift Overrun Typo Error
+INSERT INTO field_labor_logs (date_worked, job_id, cost_code, crew_leader, hours_worked, hourly_rate, entry_type) 
+VALUES ('2026-09-13', '91381', '02-300', 'Unknown_Entry', -5, 45.00, 'DAILY'), -- Should be trapped: negative hours
+       ('2026-09-15', '91381', '02-300', 'Smith_T', 24, 45.00, 'DAILY');       -- Should be trapped: 24h single shift
 
 -- Compiling the Final Dynamic Exception Audit View
 CREATE VIEW erp_data_exceptions_audit AS
@@ -75,15 +85,22 @@ SELECT
     timecard_id,
     job_id,
     cost_code,
+    entry_type,
     hours_worked,
     CASE 
-        WHEN hours_worked <= 0 THEN 'ERROR: Negative Hours Entered'
-        WHEN hours_worked > 16 THEN 'ERROR: Over 16 Hours in a Single Shift'
+        WHEN hours_worked <= 0 THEN 'ERROR: Zero or Negative Hours Entered'
+        WHEN entry_type = 'DAILY'  AND hours_worked > 16 THEN 'ERROR: Over 16 Hours in a Single Shift'
+        WHEN entry_type = 'WEEKLY' AND hours_worked > 80 THEN 'ERROR: Over 80 Hours in a Single Week'
     END AS error_description
 FROM field_labor_logs
-WHERE hours_worked <= 0 OR hours_worked > 16;
+WHERE hours_worked <= 0
+   OR (entry_type = 'DAILY'  AND hours_worked > 16)
+   OR (entry_type = 'WEEKLY' AND hours_worked > 80);
 
 -- PHASE 4: Core Analytics Reporting Output
 -- -------------------------------------------------------------------------
 -- Query to extract and verify all active anomalies trapped by the audit view:
 -- SELECT * FROM erp_data_exceptions_audit;
+--
+-- Expected result: exactly 2 rows (timecard 4: -5 hours; timecard 5: 24-hour shift).
+-- The three weekly logs (40, 40, 35) must NOT appear.
